@@ -80,22 +80,35 @@ def sample_episode(cd: CategoryData, rng: np.random.Generator, cfg: dict) -> dic
     normal_idx = sorted(rng.choice(cd.n_pool, size=k0, replace=False).tolist())
     perm = rng.permutation(cd.type_idx[t]).tolist()
     kd = min(kd, max(len(perm) - n_seen, 0))
-    defect_idx, seen_q = perm[:kd], perm[kd:kd + n_seen]
-    others = [i for u in cd.defect_types if u != t for i in cd.type_idx[u]]
-    if others:
-        held_q = rng.choice(others, size=min(n_held, len(others)), replace=False).tolist()
-    else:                                                 # single-type category (toothbrush)
-        held_q = perm[kd + n_seen:kd + n_seen + n_held]
-    defect_q = seen_q + held_q
+    defect_idx = perm[:kd]
+    if cfg.get("defect_query_mode", "balanced") == "natural":
+        # every remaining defect image equally likely, so the seen type's share of the
+        # queries matches its share of the test set (about 1 / number of types)
+        pool = [i for u in cd.defect_types for i in cd.type_idx[u] if i not in defect_idx]
+        defect_q = rng.choice(pool, size=min(n_seen + n_held, len(pool)), replace=False).tolist()
+    else:
+        seen_q = perm[kd:kd + n_seen]
+        others = [i for u in cd.defect_types if u != t for i in cd.type_idx[u]]
+        if others:
+            held_q = rng.choice(others, size=min(n_held, len(others)), replace=False).tolist()
+        else:                                             # single-type category (toothbrush)
+            held_q = perm[kd + n_seen:kd + n_seen + n_held]
+        defect_q = seen_q + held_q
 
-    free = np.setdiff1d(np.arange(cd.train.shape[0]), normal_idx)   # pool image j = train image j
-    normal_q = rng.choice(free, size=n_norm, replace=False).tolist()
+    if cfg.get("normal_query_source", "train") == "test_good":
+        # same acquisition split as the defective queries, as at evaluation time
+        normal_q = rng.choice(cd.good_idx, size=min(n_norm, len(cd.good_idx)), replace=False).tolist()
+        nq_feats, nq_fg = cd.test[normal_q], cd.test_fg[normal_q]
+    else:
+        free = np.setdiff1d(np.arange(cd.train.shape[0]), normal_idx)   # pool image j = train image j
+        normal_q = rng.choice(free, size=n_norm, replace=False).tolist()
+        nq_feats, nq_fg = cd.train[normal_q], cd.train_fg[normal_q]
 
     support = Support(normal_idx, sorted(defect_idx), t)
     normal_bank, defect_bank = build_banks(cd, support, rotation=cfg.get("rotation", True))
     dev = cd.test.device
-    q = torch.cat([cd.train[normal_q], cd.test[defect_q]])
-    fg = torch.cat([cd.train_fg[normal_q], cd.test_fg[defect_q]])
+    q = torch.cat([nq_feats, cd.test[defect_q]])
+    fg = torch.cat([nq_fg, cd.test_fg[defect_q]])
     labels = torch.cat([torch.zeros(len(normal_q), q.shape[1], dtype=torch.int8, device=dev),
                         cd.test_labels[defect_q]])
     img_labels = torch.tensor([0] * len(normal_q) + [1] * len(defect_q), device=dev)
