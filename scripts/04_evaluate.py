@@ -26,7 +26,7 @@ from fsiad.model import make_model                                    # noqa: E4
 from fsiad.runner import (device_of, evaluate_methods, free_gpu, load_cd,  # noqa: E402
                           load_fixed_bank, load_trained)
 
-ADAPTERS = ["linear", "mlp", "lowrank"]
+ADAPTERS = ["fusion", "linear", "mlp", "lowrank"]
 
 
 def main():
