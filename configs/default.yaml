@@ -1,0 +1,84 @@
+# FS-IAD default configuration. Every value follows the math spec.
+# Paths are set for Kaggle; change them for Colab or a local machine.
+
+data_root: /kaggle/input/datasets/ipythonx/mvtec-ad   # folder holding the 15 category folders
+cache_dir: /kaggle/working/cache                      # ~5.5 GB of cached features
+results_dir: /kaggle/working/results
+
+device: cuda
+batch_size: 32            # images per DINOv2 forward pass when caching
+
+# --- Backbone and preprocessing (spec 2.5, copied from AnomalyDINO) ---
+model_name: dinov2_vits14
+resolution: 448           # smaller edge, multiple of 14 -> 32x32 = 1024 patches
+
+# --- Rotation and support pool (spec 2.5, 9, 10) ---
+rotation_angles: [0, 45, 90, 135, 180, 225, 270, 315]
+pool_size: 16             # support images come from the first 16 train images (sorted names)
+
+# --- Background masking (spec 2.5) ---
+mask_threshold: 10.0
+mask_kernel: 3
+mask_border: 0.2
+masked_categories: [capsule, hazelnut, pill, screw, toothbrush]
+
+# --- Patch labels (spec 1) ---
+label_rho: 0.5            # patch is defective if >= 50% of its pixels are in the mask
+
+# --- Scoring (spec 4-6) ---
+blur_sigma: 4.0           # Gaussian blur on full-resolution maps
+top_fraction: 0.01        # image score = mean of top floor(0.01 * P) patch scores
+softmin_k: 10             # top-k soft-min (training and adapter scoring)
+
+# --- Evaluation (spec 11) ---
+pro_fpr_limit: 0.3
+compute_pixel_ap: true    # extra metric; AnomalyDINO does not report it
+
+# --- Baseline reproduction (spec 2.5) ---
+repro_shots: [1, 2, 4]
+repro_seeds: [0, 1, 2]
+
+categories: [bottle, cable, capsule, carpet, grid, hazelnut, leather, metal_nut,
+             pill, screw, tile, toothbrush, transistor, wood, zipper]
+
+# --- Folds (spec 10) ---
+fold_seed: 0
+
+# --- Primary comparison, fixed before running (spec 11) ---
+primary_metric: px_aupro
+primary_setting: [2, 1]          # k0 normal shots, k_d defect shots
+primary_pair: [linear, fixed_bank]
+
+# --- Fixed-score defect bank: grid on training categories (spec 5.3) ---
+fixed_lambdas: [0.0, 0.05, 0.1, 0.2, 0.4, 0.8]
+fixed_tau_ds: [0.02, 0.05, 0.1, 0.2]
+fit_max_types: 3                 # seen types per training category in the grid search
+
+# --- Adapter training (spec 7, 9.1, 12) ---
+k0_choices: [1, 2, 4]
+kd_choices: [0, 1, 2, 4]
+n_query_normal: 4
+n_query_seen: 2
+n_query_heldout: 2
+defect_query_mode: natural       # defect queries sampled like the test set (was: half seen type)
+normal_query_source: test_good  # normal queries from test-split good images (was train split)
+rotation: true
+episodes_per_step: 4
+steps: 5000
+lr: 0.0001                       # fold-0 run: 1e-3 overfit within 250 steps
+beta: 0.5                        # image-term weight
+eta: 0.1                         # weight decay toward the identity adapter (was 0.001)
+neg_per_pos: 64
+mlp_hidden: 96
+lowrank_r: 16
+calib_episodes: 20
+log_every: 50
+eval_every: 50
+patience: 750                    # early stop after this many steps without validation gain
+val_max_types: 3
+probe_train_categories: 2        # also log AU-PRO on this many training categories (overfit check)
+train_seed: 0
+
+# --- Evaluation (spec 9.2) ---
+eval_settings: [[2, 1], [2, 0]]  # (k0, k_d); add e.g. [1, 1], [4, 1] if time allows
+eval_seeds: 5
