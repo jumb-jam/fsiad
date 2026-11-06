@@ -1,6 +1,7 @@
 """Step 3: train one method on one fold.
 
   --method linear | mlp | lowrank   episodic meta-training of adapter + learned fusion (spec 9.1)
+  --method fusion                   learned lambda / tau / tau_D only, adapter frozen at identity
   --method fixed_bank               grid search of (lambda, tau_D) on training categories (spec 5.3)
 
 Usage:
@@ -120,6 +121,9 @@ def train_adapter(cfg, fold, method, split, device, smoke):
     cds = [load_cd(n, cfg, device) for n in train_names]
     val_cds = [load_cd(n, cfg, device) for n in split["val"]]
     val_evs = [CategoryEvaluator(cd, cfg["data_root"], cfg) for cd in val_cds]
+    n_probe = cfg.get("probe_train_categories", 0)
+    probe_cds = cds[:n_probe]
+    probe_evs = [CategoryEvaluator(cd, cfg["data_root"], cfg) for cd in probe_cds]
     dim = cds[0].dim
 
     tau0, a = calibrate(cds, cfg, rng, device, dim)
@@ -130,7 +134,9 @@ def train_adapter(cfg, fold, method, split, device, smoke):
     steps = 20 if smoke else cfg["steps"]
     eval_every = 10 if smoke else cfg["eval_every"]
     val0 = validate(model, val_cds, val_evs, cfg, smoke)
-    print(f"step     0  val AU-PRO {val0:.4f}  (= frozen-feature start)", flush=True)
+    tr0 = validate(model, probe_cds, probe_evs, cfg, smoke) if probe_cds else float("nan")
+    print(f"step     0  val AU-PRO {val0:.4f}  train-cat AU-PRO {tr0:.4f}  (= frozen-feature start)",
+          flush=True)
     best, best_step, log = val0, 0, []
     ck_path = checkpoint_path(cfg, fold, method)
     meta = {"method": method, "fold": fold, "tau0": tau0, "a": a, "split": split}
@@ -147,8 +153,8 @@ def train_adapter(cfg, fold, method, split, device, smoke):
             lp = patch_pair_loss(s, ep["labels"], ep["fg"], a, cfg["neg_per_pos"], gen)
             li = image_pair_loss(image_scores(s, cfg["top_fraction"]), ep["img_labels"], a)
             ((lp + cfg["beta"] * li) / cfg["episodes_per_step"]).backward()
-            lp_sum += float(lp)
-            li_sum += float(li)
+            lp_sum += float(lp.detach())
+            li_sum += float(li.detach())
         reg = cfg["eta"] * model.reg()
         if reg.requires_grad:
             reg.backward()
@@ -160,20 +166,22 @@ def train_adapter(cfg, fold, method, split, device, smoke):
             e = cfg["episodes_per_step"]
             log.append({"step": step, "loss_pix": lp_sum / e, "loss_img": li_sum / e,
                         "lam": float(model.lam), "tau": float(model.tau), "tau_d": float(model.tau_d),
-                        "reg": float(model.reg())})
+                        "reg": float(model.reg().detach())})
             r = log[-1]
             print(f"step {step:5d}  pix {r['loss_pix']:.4f}  img {r['loss_img']:.4f}  "
                   f"lam {r['lam']:.4f}  tau {r['tau']:.4f}  tau_D {r['tau_d']:.4f}  "
                   f"|W|^2 {r['reg']:.4f}  {time.time() - t0:6.0f}s", flush=True)
         if step % eval_every == 0:
             val = validate(model, val_cds, val_evs, cfg, smoke)
-            log.append({"step": step, "val_aupro": val})
+            tr = validate(model, probe_cds, probe_evs, cfg, smoke) if probe_cds else float("nan")
+            log.append({"step": step, "val_aupro": val, "train_cat_aupro": tr})
             flag = ""
             if val > best:
                 best, best_step, flag = val, step, "  * best"
                 torch.save({"state_dict": model.state_dict(), **meta, "best_val": best,
                             "best_step": step}, ck_path)
-            print(f"step {step:5d}  val AU-PRO {val:.4f}{flag}", flush=True)
+            print(f"step {step:5d}  val AU-PRO {val:.4f} ({val - val0:+.4f})  "
+                  f"train-cat AU-PRO {tr:.4f} ({tr - tr0:+.4f}){flag}", flush=True)
             if step - best_step >= cfg["patience"]:
                 print(f"early stop: no improvement for {cfg['patience']} steps")
                 break
@@ -186,7 +194,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="configs/default.yaml")
     ap.add_argument("--fold", type=int, required=True)
-    ap.add_argument("--method", required=True, choices=["linear", "mlp", "lowrank", "fixed_bank"])
+    ap.add_argument("--method", required=True, choices=["fusion", "linear", "mlp", "lowrank", "fixed_bank"])
     ap.add_argument("--smoke", action="store_true", help="tiny run to check for bugs")
     ap.add_argument("--set", nargs="*", default=[], help="config overrides key=value")
     args = ap.parse_args()
