@@ -13,6 +13,8 @@ Appends rows to <results_dir>/eval.csv as each category finishes.
 import argparse
 import os
 import sys
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
