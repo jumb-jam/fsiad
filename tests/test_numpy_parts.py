@@ -121,3 +121,21 @@ def test_pixel_auroc_matches_sklearn_on_random_maps():
     fprs, pros = compute_pro(maps, gt)
     assert fprs[0] == 0 and fprs[-1] == 1 and np.all(np.diff(fprs) >= -1e-12)
     assert 0.0 <= m["px_aupro"] <= 1.0
+
+
+def test_fast_pixel_metrics_match_reference():
+    from fsiad.metrics import pixel_metrics_reference
+    rng = np.random.default_rng(3)
+    gts, maps = [], []
+    for i in range(5):
+        g = np.zeros((60, 70), bool)
+        if i % 2:
+            g[10:20, 5:25] = True
+            g[40:44, 50:66] = True          # second, separate region
+        gts.append(g)
+        m = rng.random((60, 70)) + 0.6 * g
+        maps.append(np.round(m, 2).astype(np.float32))   # rounding creates many ties
+    fast = pixel_metrics(maps, gts, fpr_limit=0.3)
+    ref = pixel_metrics_reference(maps, gts, fpr_limit=0.3)
+    for k in ref:
+        assert abs(fast[k] - ref[k]) < 1e-9, (k, fast[k], ref[k])
