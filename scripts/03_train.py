@@ -16,6 +16,8 @@ import itertools
 import json
 import os
 import sys
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -118,7 +120,8 @@ def train_adapter(cfg, fold, method, split, device, smoke):
     torch.manual_seed(cfg["train_seed"] + fold)
     train_names = split["train"][:3] if smoke else split["train"]
     print("loading", train_names, "+ val", split["val"], flush=True)
-    cds = [load_cd(n, cfg, device) for n in train_names]
+    need_train = cfg.get("normal_query_source", "train") == "train"
+    cds = [load_cd(n, cfg, device, load_train=need_train) for n in train_names]
     val_cds = [load_cd(n, cfg, device) for n in split["val"]]
     val_evs = [CategoryEvaluator(cd, cfg["data_root"], cfg) for cd in val_cds]
     n_probe = cfg.get("probe_train_categories", 0)
