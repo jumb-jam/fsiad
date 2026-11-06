@@ -171,3 +171,28 @@ def test_softmin_gradient_flows_to_adapter():
     s.sum().backward()
     assert model.adapter.W.grad.abs().sum() > 0
     assert model.lam.grad is not None and model.log_tau.grad is not None
+
+
+def test_episode_normal_queries_from_test_good():
+    cd = CategoryData(fake_category(), DEV)
+    rng = np.random.default_rng(5)
+    for _ in range(10):
+        ep = sample_episode(cd, rng, {**CFG, "normal_query_source": "test_good"})
+        n_norm = int((ep["img_labels"] == 0).sum())
+        assert n_norm == 2
+        assert torch.all(ep["labels"][:n_norm] == 0)
+
+
+def test_fusion_model_trains_only_fusion_parameters():
+    model = make_model("fusion", D, {"softmin_k": 5}).to(DEV)
+    names = {n for n, p in model.named_parameters()}
+    assert names == {"log_tau", "lam", "log_tau_d"}
+    assert not model.hard
+
+
+def test_natural_defect_queries_exclude_support():
+    cd = CategoryData(fake_category(), DEV)
+    rng = np.random.default_rng(7)
+    for _ in range(20):
+        ep = sample_episode(cd, rng, {**CFG, "kd_choices": [2], "defect_query_mode": "natural"})
+        assert ep["kd"] == 2 and int((ep["img_labels"] == 1).sum()) == 2
