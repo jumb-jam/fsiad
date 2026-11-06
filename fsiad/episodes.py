@@ -10,13 +10,16 @@ import torch
 class CategoryData:
     """One category's cache, moved to `device` once."""
 
-    def __init__(self, c: dict, device: str):
+    def __init__(self, c: dict, device: str, load_train: bool = True):
         self.name = c["category"]
         self.grid = tuple(c["grid"])
         self.pool = c["pool_feats"].to(device)            # (Npool, R, P, D) half
-        self.train = c["train_feats"].to(device)          # (Ntrain, P, D) half
+        # train-split features are only needed for normal queries drawn from the train split;
+        # skipping them saves ~0.8 MB per image (~2.5 GB of GPU memory for a training fold)
+        self.n_train = c["train_feats"].shape[0]
+        self.train = c["train_feats"].to(device) if load_train else None   # (Ntrain, P, D) half
         self.test = c["test_feats"].to(device)            # (Ntest, P, D) half
-        self.train_fg = c["train_fg"].to(device)
+        self.train_fg = c["train_fg"].to(device) if load_train else None
         self.test_fg = c["test_fg"].to(device)
         self.test_labels = c["test_labels"].to(device)    # (Ntest, P) int8: 1 / 0 / -1
         self.test_types = list(c["test_types"])
@@ -100,7 +103,9 @@ def sample_episode(cd: CategoryData, rng: np.random.Generator, cfg: dict) -> dic
         normal_q = rng.choice(cd.good_idx, size=min(n_norm, len(cd.good_idx)), replace=False).tolist()
         nq_feats, nq_fg = cd.test[normal_q], cd.test_fg[normal_q]
     else:
-        free = np.setdiff1d(np.arange(cd.train.shape[0]), normal_idx)   # pool image j = train image j
+        if cd.train is None:
+            raise ValueError("normal_query_source='train' needs CategoryData(load_train=True)")
+        free = np.setdiff1d(np.arange(cd.n_train), normal_idx)   # pool image j = train image j
         normal_q = rng.choice(free, size=n_norm, replace=False).tolist()
         nq_feats, nq_fg = cd.train[normal_q], cd.train_fg[normal_q]
 
