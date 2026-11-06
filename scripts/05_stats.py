@@ -24,7 +24,8 @@ def md_table(df, **kw):
 
 
 METRICS = ["px_aupro", "px_auroc", "px_f1max", "px_ap", "img_auroc", "img_ap", "img_f1max"]
-PAIRS = [("linear", "fixed_bank"), ("mlp", "fixed_bank"), ("linear", "baseline"),
+PAIRS = [("linear", "fixed_bank"), ("fusion", "fixed_bank"), ("fusion", "baseline"),
+         ("linear", "fusion"), ("lowrank", "fixed_bank"), ("mlp", "fixed_bank"), ("linear", "baseline"),
          ("mlp", "baseline"), ("fixed_bank", "baseline"), ("random_control", "baseline"),
          ("mlp", "linear"), ("lowrank", "linear")]
 
