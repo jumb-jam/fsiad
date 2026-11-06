@@ -176,14 +176,14 @@ def train_adapter(cfg, fold, method, split, device, smoke):
             tr = validate(model, probe_cds, probe_evs, cfg, smoke) if probe_cds else float("nan")
             log.append({"step": step, "val_aupro": val, "train_cat_aupro": tr})
             flag = ""
-            if val > best:
+            if val > best + cfg.get("min_delta", 0.0):        # ignore negligible gains
                 best, best_step, flag = val, step, "  * best"
                 torch.save({"state_dict": model.state_dict(), **meta, "best_val": best,
                             "best_step": step}, ck_path)
             print(f"step {step:5d}  val AU-PRO {val:.4f} ({val - val0:+.4f})  "
                   f"train-cat AU-PRO {tr:.4f} ({tr - tr0:+.4f}){flag}", flush=True)
             if step - best_step >= cfg["patience"]:
-                print(f"early stop: no improvement for {cfg['patience']} steps")
+                print(f"early stop: no gain above {cfg.get('min_delta', 0.0)} for {cfg['patience']} steps")
                 break
 
     pd.DataFrame(log).to_csv(ck_path.replace(".pt", "_log.csv"), index=False)
