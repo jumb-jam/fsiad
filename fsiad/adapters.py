@@ -64,7 +64,7 @@ class MLPAdapter(nn.Module):
 
 
 def make_adapter(name: str, d: int, cfg: dict) -> nn.Module:
-    if name in ("identity", "baseline", "fixed_bank"):
+    if name in ("identity", "baseline", "fixed_bank", "fusion"):
         return Identity()
     if name == "linear":
         return LinearAdapter(d)
