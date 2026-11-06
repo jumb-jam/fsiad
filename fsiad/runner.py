@@ -20,8 +20,8 @@ def device_of(cfg: dict) -> str:
     return cfg["device"] if torch.cuda.is_available() else "cpu"
 
 
-def load_cd(name: str, cfg: dict, device: str) -> CategoryData:
-    return CategoryData(load_category(cfg["cache_dir"], name), device)
+def load_cd(name: str, cfg: dict, device: str, load_train: bool = False) -> CategoryData:
+    return CategoryData(load_category(cfg["cache_dir"], name), device, load_train=load_train)
 
 
 def free_gpu():
