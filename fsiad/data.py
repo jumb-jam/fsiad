@@ -9,9 +9,14 @@ import numpy as np
 import yaml
 
 
-def load_config(path: str) -> dict:
+def load_config(path: str, overrides: list[str] | None = None) -> dict:
+    """Load YAML config; `overrides` like ["cache_dir=/kaggle/input/x/cache", "steps=100"]."""
     with open(path) as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    for item in overrides or []:
+        key, value = item.split("=", 1)
+        cfg[key.strip()] = yaml.safe_load(value)
+    return cfg
 
 
 @dataclass
