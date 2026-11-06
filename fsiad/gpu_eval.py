@@ -15,7 +15,9 @@ from scipy.ndimage import label
 
 from .data import load_mask
 from .losses import image_scores
-from .metrics import image_metrics
+from .metrics import image_metrics, pixel_metrics
+
+_OOM = getattr(torch, "OutOfMemoryError", torch.cuda.OutOfMemoryError)
 
 
 # ---------------------------------------------------------------- maps
@@ -66,18 +68,22 @@ def _trapezoid_limited(x: torch.Tensor, y: torch.Tensor, x_max: float) -> float:
 
 def pixel_metrics_gpu(maps: torch.Tensor, gt: torch.Tensor, pro_w: torch.Tensor,
                       num_regions: int, fpr_limit: float = 0.3, compute_ap: bool = True) -> dict:
-    """maps (N,H,W) float, gt (N,H,W) bool, pro_w (N,H,W) = 1/region size on defect pixels."""
-    pred = maps.reshape(-1)
-    s, order = torch.sort(pred, descending=True, stable=True)
-    last = torch.ones_like(s, dtype=torch.bool)
+    """maps (N,H,W) float, gt (N,H,W) bool, pro_w (N,H,W) = 1/region size on defect pixels.
+
+    Memory-lean: about 20 bytes per pixel at peak. Counts use exact int32 cumulative sums,
+    false positives come from positions (fp = rank - tp), and every large temporary is freed
+    as soon as it is used. Same values as fsiad.metrics.pixel_metrics.
+    """
+    s, order = torch.sort(maps.reshape(-1), descending=True, stable=True)
+    last = torch.ones(s.shape[0], dtype=torch.bool, device=s.device)
     last[:-1] = s[1:] != s[:-1]
     del s
-    y = gt.reshape(-1)[order]
-    tps = torch.cumsum(y.double(), 0)[last]
-    fps = torch.cumsum((~y).double(), 0)[last]
-    del y
-    pro = torch.cumsum(pro_w.reshape(-1)[order].double(), 0)[last]
-    del order, last
+    pos = torch.nonzero(last).squeeze(1)              # index of the last pixel of each tie group
+    del last
+    tps = torch.cumsum(gt.reshape(-1)[order], 0, dtype=torch.int32)[pos].double()
+    fps = (pos + 1).double() - tps
+    pro = torch.cumsum(pro_w.reshape(-1)[order], 0, dtype=torch.float64)[pos]
+    del order, pos
 
     zero, one = tps.new_zeros(1), tps.new_ones(1)
     n_pos, n_neg = tps[-1], fps[-1]
@@ -104,11 +110,15 @@ def relocate(path: str, data_root: str, category: str) -> str:
 
 
 class CategoryEvaluator:
-    """Holds one category's ground truth on the GPU and scores any subset of test images."""
+    """Holds one category's ground truth (on the CPU) and scores any subset of test images.
+
+    Ground truth moves to the GPU only for the subset being scored, so several evaluators can
+    coexist with the training data. If the GPU still runs out of memory, the exact CPU metrics
+    are used instead.
+    """
 
     def __init__(self, cd, data_root: str, cfg: dict):
         self.cd, self.cfg = cd, cfg
-        dev = cd.test.device
         shapes = set(cd.test_shapes)
         if len(shapes) != 1:
             raise ValueError(f"{cd.name}: mixed image sizes {shapes}")
@@ -126,8 +136,8 @@ class CategoryEvaluator:
             gts.append(torch.from_numpy(g))
             ws.append(torch.from_numpy(w))
             regions.append(n)
-        self.gt = torch.stack(gts).to(dev)
-        self.pro_w = torch.stack(ws).to(dev)
+        self.gt = torch.stack(gts)                      # CPU
+        self.pro_w = torch.stack(ws)                    # CPU
         self.regions = np.array(regions)
 
     def evaluate(self, patch_scores: torch.Tensor, subsets: dict[str, list[int]],
@@ -143,10 +153,29 @@ class CategoryEvaluator:
                 continue
             res = image_metrics(labels, img[idx])
             if pixel:
-                t = torch.as_tensor(idx, device=maps.device)
-                res.update(pixel_metrics_gpu(maps[t], self.gt[t], self.pro_w[t],
-                                             int(self.regions[idx].sum()), cfg["pro_fpr_limit"],
-                                             cfg["compute_pixel_ap"]))
+                res.update(self._pixel(maps, idx))
             out[name] = res
         del maps
         return out
+
+    def _pixel(self, maps: torch.Tensor, idx: list[int]) -> dict:
+        cfg = self.cfg
+        dev = maps.device
+        t_cpu = torch.as_tensor(idx)
+        args = (int(self.regions[idx].sum()), cfg["pro_fpr_limit"], cfg["compute_pixel_ap"])
+        ok = True
+        try:
+            sub = maps[t_cpu.to(dev)]
+            res = pixel_metrics_gpu(sub, self.gt[t_cpu].to(dev), self.pro_w[t_cpu].to(dev), *args)
+        except _OOM:                                    # no `as e`: lets the GPU tensors be freed
+            ok = False
+        if ok:
+            return res
+        sub = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print(f"  [{self.cd.name}] GPU out of memory in pixel metrics; using the CPU (same values)",
+              flush=True)
+        m = maps.cpu()[t_cpu].numpy()                   # copy off the GPU first: no new GPU memory
+        g = self.gt[t_cpu].numpy()
+        return pixel_metrics(list(m), list(g), cfg["pro_fpr_limit"], cfg["compute_pixel_ap"])
