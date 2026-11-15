@@ -110,3 +110,32 @@ def margin_scores(global_scores: torch.Tensor, positional_scores: torch.Tensor, 
     support patch typically is.
     """
     return global_scores + weight * (positional_scores - global_scores - margin).clamp_min(0.0)
+
+
+@torch.no_grad()
+def positional_parts(test_feats: torch.Tensor, test_fg: torch.Tensor, pool_sup: torch.Tensor,
+                     pool_fg: torch.Tensor, grid: tuple[int, int], radius: int = 2):
+    """Everything the positional add-on needs for one support set, from raw features.
+
+    Returns (base, gap, support_gap):
+      base         (N, P) AnomalyDINO scores (global 1-NN over all rotations)
+      gap          (N, P) positional - global per test patch (0 on background)
+      support_gap  (M,)   the same gap between the support images themselves (leave-one-out)
+    """
+    d = pool_sup.shape[-1]
+    base = baseline_patch_scores(test_feats, test_fg, unit(pool_sup.reshape(-1, d)))
+    pos = positional_patch_scores(test_feats, test_fg, pool_sup[:, 0], grid, radius)
+    return base, (pos - base).clamp_min(0.0), support_gaps(pool_sup, pool_fg, grid, radius)
+
+
+def positional_term(gap: torch.Tensor, support_gap: torch.Tensor, quantile: float | None,
+                    weight: float) -> torch.Tensor:
+    """weight * max(0, gap - m), m = `quantile`-th percentile of the support gaps.
+
+    Added to ANY method's patch scores. Zero wherever a patch is no more out of place than
+    normal support patches typically are, and zero everywhere when weight = 0.
+    """
+    if not weight or quantile is None or support_gap.numel() == 0:
+        return torch.zeros_like(gap)
+    m = torch.quantile(support_gap.float(), quantile / 100.0)
+    return weight * (gap - m).clamp_min(0.0)
