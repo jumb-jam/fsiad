@@ -7,7 +7,8 @@ import pytest
 torch = pytest.importorskip("torch")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fsiad.positional import alignment_ratio, positional_distances, positional_patch_scores  # noqa: E402
+from fsiad.positional import (alignment_ratio, margin_scores, positional_distances,  # noqa: E402
+                              positional_patch_scores, support_gaps)
 from fsiad.scoring import knn_distances, unit                                              # noqa: E402
 
 torch.manual_seed(0)
@@ -44,3 +45,20 @@ def test_background_zero_and_alignment_ratio_at_least_one():
     sc = positional_patch_scores(q, fg, s, (4, 4), 1)
     assert torch.all(sc[0, :3] == 0) and torch.all(sc[0, 3:] > 0)
     assert alignment_ratio(s, torch.ones(2, 16, dtype=torch.bool), (4, 4), 1) >= 1.0 - 1e-6
+
+
+def test_margin_scores_equal_baseline_below_margin():
+    g = torch.tensor([[0.1, 0.2, 0.3]])
+    p = torch.tensor([[0.15, 0.6, 0.3]])                     # gaps 0.05, 0.4, 0
+    s = margin_scores(g, p, margin=0.1, weight=1.0)
+    assert torch.allclose(s, torch.tensor([[0.1, 0.5, 0.3]]))
+    assert torch.equal(margin_scores(g, p, margin=1.0, weight=1.0), g)
+
+
+def test_support_gaps_nonnegative_and_zero_for_identical_supports():
+    pool = torch.randn(2, 3, 16, 8)
+    fg = torch.ones(2, 16, dtype=torch.bool)
+    gaps = support_gaps(pool, fg, (4, 4), 1)
+    assert gaps.shape == (32,) and torch.all(gaps >= 0)
+    same = pool[:1].repeat(2, 1, 1, 1)                        # two identical images: no gap
+    assert torch.allclose(support_gaps(same, fg, (4, 4), 1), torch.zeros(32), atol=1e-5)
