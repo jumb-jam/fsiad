@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import torch
 
-from .scoring import knn_distances, unit
+from .scoring import baseline_patch_scores, knn_distances, unit
 
 
 def _windows(h: int, w: int, radius: int):
@@ -76,3 +76,37 @@ def alignment_ratio(support: torch.Tensor, fg: torch.Tensor, grid: tuple[int, in
             d_glob = knn_distances(unit(support[a]), unit(support[b]), k=1)[:, 0]
             ratios.append(float(d_pos[m].mean() / d_glob[m].mean().clamp_min(1e-8)))
     return float(sum(ratios) / len(ratios)) if ratios else float("nan")
+
+
+@torch.no_grad()
+def support_gaps(pool_sup: torch.Tensor, fg: torch.Tensor, grid: tuple[int, int],
+                 radius: int) -> torch.Tensor:
+    """Normal "out of place" gaps, measured on the support set alone (leave-one-out).
+
+    pool_sup (k, R, P, D): support features with rotations (index 0 = unrotated); fg (k, P).
+    Each support image is scored against the other k-1 exactly like a test image: global 1-NN
+    over all their rotations, positional 1-NN over their unrotated features within +/- radius.
+    Returns the gaps positional - global (>= 0) on its foreground patches, pooled over images.
+    A quantile of these gaps is the margin: how far out of place normal parts can look.
+    Needs k >= 2.
+    """
+    k, _, _, d = pool_sup.shape
+    gaps = []
+    for a in range(k):
+        ref = pool_sup[[b for b in range(k) if b != a]]
+        q, m = pool_sup[a:a + 1, 0], fg[a:a + 1]
+        glob = baseline_patch_scores(q, m, unit(ref.reshape(-1, d)))
+        pos = positional_patch_scores(q, m, ref[:, 0], grid, radius)
+        gaps.append((pos - glob)[0][fg[a]])
+    return torch.cat(gaps).clamp_min(0.0)
+
+
+def margin_scores(global_scores: torch.Tensor, positional_scores: torch.Tensor, margin: float,
+                  weight: float) -> torch.Tensor:
+    """global + weight * max(0, (positional - global) - margin).
+
+    Equals the global (baseline) score on every patch whose gap is within the normal range,
+    so the positional term can only raise patches that are more out of place than any normal
+    support patch typically is.
+    """
+    return global_scores + weight * (positional_scores - global_scores - margin).clamp_min(0.0)
