@@ -2,7 +2,9 @@
 
 For each test category, shot setting, seen defect type and seed, all methods are scored on the
 SAME support set (paired comparison). Methods: baseline (normal-only AnomalyDINO), fixed_bank,
-random_control, and every trained adapter found in <results_dir>/checkpoints.
+random_control, and every trained adapter found in <results_dir>/checkpoints. If the fold has a
+positional fit (fold{F}_positional.json), every method except random_control is also scored with
+the positional add-on, as "<method>+pos" (pass --no-pos to skip).
 
 Usage:
   python scripts/04_evaluate.py --folds 0                 # one fold
@@ -26,7 +28,7 @@ from fsiad.folds import fold_split                                    # noqa: E4
 from fsiad.gpu_eval import CategoryEvaluator                          # noqa: E402
 from fsiad.model import make_model                                    # noqa: E402
 from fsiad.runner import (device_of, evaluate_methods, free_gpu, load_cd,  # noqa: E402
-                          load_fixed_bank, load_trained)
+                          load_fixed_bank, load_positional, load_trained)
 
 ADAPTERS = ["fusion", "linear", "mlp", "lowrank"]
 
@@ -39,6 +41,7 @@ def main():
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--out", default="eval.csv")
     ap.add_argument("--append", action="store_true", help="add to an existing results file")
+    ap.add_argument("--no-pos", action="store_true", help="skip the positional add-on")
     ap.add_argument("--set", nargs="*", default=[])
     args = ap.parse_args()
     cfg = load_config(args.config, args.set)
@@ -53,6 +56,8 @@ def main():
     for fold in args.folds:
         split = fold_split(fold, cfg["fold_seed"])
         cats = split["test"][:1] if args.smoke else split["test"]
+        pos = None if args.no_pos else load_positional(cfg, fold)
+        print(f"fold {fold}: positional add-on {pos}", flush=True)
         for name in cats:
             t0 = time.time()
             cd = load_cd(name, cfg, device)
@@ -67,7 +72,8 @@ def main():
                     methods[a] = m
             ev = CategoryEvaluator(cd, cfg["data_root"], cfg)
             rows = evaluate_methods(methods, cd, ev, settings, seeds,
-                                    max_types=1 if args.smoke else None, extra={"fold": fold})
+                                    max_types=1 if args.smoke else None, extra={"fold": fold},
+                                    positional=pos)
             df = pd.DataFrame(rows)
             df.to_csv(out, mode="a", header=not os.path.exists(out), index=False)
             summary = (df[df.subset == "all"].groupby(["k0", "kd", "method"])["px_aupro"].mean() * 100)
