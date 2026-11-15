@@ -27,7 +27,11 @@ METRICS = ["px_aupro", "px_auroc", "px_f1max", "px_ap", "img_auroc", "img_ap", "
 PAIRS = [("linear", "fixed_bank"), ("fusion", "fixed_bank"), ("fusion", "baseline"),
          ("linear", "fusion"), ("lowrank", "fixed_bank"), ("mlp", "fixed_bank"), ("linear", "baseline"),
          ("mlp", "baseline"), ("fixed_bank", "baseline"), ("random_control", "baseline"),
-         ("mlp", "linear"), ("lowrank", "linear")]
+         ("mlp", "linear"), ("lowrank", "linear"),
+         # positional add-on (each method vs itself, then the full model vs the references)
+         ("baseline+pos", "baseline"), ("fixed_bank+pos", "fixed_bank"), ("fusion+pos", "fusion"),
+         ("linear+pos", "linear"), ("mlp+pos", "mlp"),
+         ("mlp+pos", "fixed_bank"), ("mlp+pos", "baseline"), ("fixed_bank+pos", "baseline")]
 
 
 def main():
