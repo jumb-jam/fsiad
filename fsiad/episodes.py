@@ -14,6 +14,7 @@ class CategoryData:
         self.name = c["category"]
         self.grid = tuple(c["grid"])
         self.pool = c["pool_feats"].to(device)            # (Npool, R, P, D) half
+        self.pool_fg = c["train_fg"][:self.pool.shape[0]].to(device)   # pool image j = train image j
         # train-split features are only needed for normal queries drawn from the train split;
         # skipping them saves ~0.8 MB per image (~2.5 GB of GPU memory for a training fold)
         self.n_train = c["train_feats"].shape[0]
