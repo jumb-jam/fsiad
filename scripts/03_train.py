@@ -3,6 +3,11 @@
   --method linear | mlp | lowrank   episodic meta-training of adapter + learned fusion (spec 9.1)
   --method fusion                   learned lambda / tau / tau_D only, adapter frozen at identity
   --method fixed_bank               grid search of (lambda, tau_D) on training categories (spec 5.3)
+  --method positional               grid search of the positional add-on (margin percentile, weight)
+                                    on training categories, normal-only, k0 = primary k0
+
+Learned methods start their fusion at the fold's fixed-bank (lambda, tau_D) when
+warm_start_fusion is on (the default), so run --method fixed_bank for that fold first.
 
 Usage:
   python scripts/03_train.py --fold 0 --method fixed_bank
@@ -32,8 +37,9 @@ from fsiad.folds import fold_split                                    # noqa: E4
 from fsiad.gpu_eval import CategoryEvaluator                          # noqa: E402
 from fsiad.losses import image_pair_loss, image_scores, patch_pair_loss  # noqa: E402
 from fsiad.model import make_model                                    # noqa: E402
+from fsiad.positional import positional_parts, positional_term         # noqa: E402
 from fsiad.runner import (checkpoint_path, device_of, evaluate_methods, free_gpu, load_cd,  # noqa: E402
-                          support_rng, test_subsets)
+                          load_json, support_rng, test_subsets)
 
 
 # ---------------------------------------------------------------- fixed bank (spec 5.3)
@@ -69,6 +75,42 @@ def fit_fixed_bank(cfg, fold, split, device, smoke):
     with open(path, "w") as f:
         json.dump(out, f, indent=2)
     print(f"best lambda={lam}, tau_D={td}: train AU-PRO {best:.4f} (lambda=0: {base_score:.4f})")
+    print(f"wrote {path}")
+
+
+# ---------------------------------------------------------------- positional add-on
+def fit_positional(cfg, fold, split, device, smoke):
+    """Pick (margin percentile, weight) on the fold's training categories; weight 0 = off."""
+    k0 = cfg["primary_setting"][0]
+    radius = cfg.get("pos_radius", 2)
+    grid = [(None, 0.0)] + [(q, w) for q in cfg["pos_quantiles"] for w in cfg["pos_weights"]]
+    cats = split["train"][:2] if smoke else split["train"]
+    seeds = range(1 if smoke else cfg.get("pos_fit_seeds", 2))
+    scores = {g: [] for g in grid}
+    for name in cats:
+        t0 = time.time()
+        cd = load_cd(name, cfg, device)
+        ev = CategoryEvaluator(cd, cfg["data_root"], cfg)
+        subsets = {"all": list(range(len(cd.test_types)))}
+        for r in seeds:
+            sup = sample_support(cd, support_rng(r, name, None, k0, 0), k0, 0, None)
+            base, gap, sgap = positional_parts(cd.test, cd.test_fg, cd.pool[sup.normal_idx],
+                                               cd.pool_fg[sup.normal_idx], cd.grid, radius)
+            for q, w in grid:
+                s = base + positional_term(gap, sgap, q, w)
+                scores[(q, w)].append(ev.evaluate(s, subsets)["all"]["px_aupro"])
+        print(f"  {name:12s} positional grid done in {time.time() - t0:5.1f}s", flush=True)
+        del cd, ev
+        free_gpu()
+    mean = {g: float(np.mean(v)) for g, v in scores.items()}
+    (q, w), best = max(mean.items(), key=lambda kv: kv[1])
+    out = {"quantile": q, "weight": w, "train_aupro": best, "train_aupro_off": mean[(None, 0.0)],
+           "grid": {f"{gq},{gw}": v for (gq, gw), v in mean.items()}}
+    path = checkpoint_path(cfg, fold, "positional").replace(".pt", ".json")
+    with open(path, "w") as f:
+        json.dump(out, f, indent=2)
+    print(f"best positional: percentile={q}, weight={w}: train AU-PRO {best:.4f} "
+          f"(off: {mean[(None, 0.0)]:.4f})")
     print(f"wrote {path}")
 
 
@@ -131,8 +173,21 @@ def train_adapter(cfg, fold, method, split, device, smoke):
 
     tau0, a = calibrate(cds, cfg, rng, device, dim)
     print(f"calibration: tau0={tau0:.4f}  a={a:.2f}", flush=True)
-    model = make_model(method, dim, cfg, tau=tau0, lam=0.0, tau_d=tau0).to(device).train()
-    opt = torch.optim.Adam(model.parameters(), lr=cfg["lr"])
+    lam0, tau_d0 = 0.0, tau0
+    if cfg.get("warm_start_fusion", True):
+        fb = load_json(cfg, fold, "fixed_bank")
+        if fb is None:
+            raise FileNotFoundError(f"warm start needs fold{fold}_fixed_bank.json: "
+                                    f"run --method fixed_bank --fold {fold} first")
+        lam0, tau_d0 = float(fb["lam"]), float(fb["tau_d"])
+        print(f"warm start: lambda={lam0}  tau_D={tau_d0}  (fold {fold} fixed bank)", flush=True)
+    model = make_model(method, dim, cfg, tau=tau0, lam=lam0, tau_d=tau_d0).to(device).train()
+    fusion = [model.lam, model.log_tau, model.log_tau_d]
+    adapter = [p for p in model.adapter.parameters()]
+    groups = [{"params": fusion, "lr": cfg.get("fusion_lr", cfg["lr"])}]
+    if adapter:
+        groups.append({"params": adapter, "lr": cfg["lr"]})
+    opt = torch.optim.Adam(groups)
 
     steps = 20 if smoke else cfg["steps"]
     eval_every = 10 if smoke else cfg["eval_every"]
@@ -142,7 +197,8 @@ def train_adapter(cfg, fold, method, split, device, smoke):
           flush=True)
     best, best_step, log = val0, 0, []
     ck_path = checkpoint_path(cfg, fold, method)
-    meta = {"method": method, "fold": fold, "tau0": tau0, "a": a, "split": split}
+    meta = {"method": method, "fold": fold, "tau0": tau0, "a": a, "split": split,
+            "lam0": lam0, "tau_d0": tau_d0}
     torch.save({"state_dict": model.state_dict(), **meta, "best_val": best, "best_step": 0}, ck_path)
     gen = torch.Generator(device=device).manual_seed(cfg["train_seed"] + fold)
 
@@ -197,7 +253,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="configs/default.yaml")
     ap.add_argument("--fold", type=int, required=True)
-    ap.add_argument("--method", required=True, choices=["fusion", "linear", "mlp", "lowrank", "fixed_bank"])
+    ap.add_argument("--method", required=True,
+                    choices=["fusion", "linear", "mlp", "lowrank", "fixed_bank", "positional"])
     ap.add_argument("--smoke", action="store_true", help="tiny run to check for bugs")
     ap.add_argument("--set", nargs="*", default=[], help="config overrides key=value")
     args = ap.parse_args()
@@ -207,6 +264,8 @@ def main():
     print(f"fold {args.fold}: test {split['test']}  val {split['val']}")
     if args.method == "fixed_bank":
         fit_fixed_bank(cfg, args.fold, split, device, args.smoke)
+    elif args.method == "positional":
+        fit_positional(cfg, args.fold, split, device, args.smoke)
     else:
         train_adapter(cfg, args.fold, args.method, split, device, args.smoke)
 
