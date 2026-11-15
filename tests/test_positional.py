@@ -12,6 +12,7 @@ from fsiad.positional import (alignment_ratio, margin_scores, positional_distanc
 from fsiad.scoring import knn_distances, unit                                              # noqa: E402
 
 torch.manual_seed(0)
+DEV = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def _brute(q, s, h, w, r):
@@ -62,3 +63,60 @@ def test_support_gaps_nonnegative_and_zero_for_identical_supports():
     assert gaps.shape == (32,) and torch.all(gaps >= 0)
     same = pool[:1].repeat(2, 1, 1, 1)                        # two identical images: no gap
     assert torch.allclose(support_gaps(same, fg, (4, 4), 1), torch.zeros(32), atol=1e-5)
+
+
+def _fake_cd():
+    from fsiad.episodes import CategoryData
+    g = torch.Generator().manual_seed(1)
+    P, D = 64, 8
+    types = ["good"] * 4 + ["scratch"] * 4
+    labels = torch.zeros(8, P, dtype=torch.int8)
+    labels[4:, :5] = 1
+    return CategoryData({
+        "category": "fake", "grid": (8, 8),
+        "pool_feats": torch.randn(4, 2, P, D, generator=g),
+        "train_feats": torch.randn(6, P, D, generator=g),
+        "test_feats": torch.randn(8, P, D, generator=g),
+        "train_fg": torch.ones(6, P, dtype=torch.bool),
+        "test_fg": torch.ones(8, P, dtype=torch.bool),
+        "test_labels": labels, "test_types": types,
+        "test_shapes": [(32, 32)] * 8, "test_masks": [None] * 8,
+        "defect_types": ["scratch"],
+    }, DEV, load_train=False)
+
+
+class _StubEvaluator:
+    """Records a score summary instead of computing pixel metrics."""
+
+    def evaluate(self, scores, subsets, pixel=True):
+        return {k: {"px_aupro": float(scores[v].sum())} for k, v in subsets.items()}
+
+
+def test_positional_parts_and_term():
+    from fsiad.positional import positional_parts, positional_term
+    cd = _fake_cd()
+    base, gap, sgap = positional_parts(cd.test, cd.test_fg, cd.pool[[0, 1]], cd.pool_fg[[0, 1]], cd.grid, 2)
+    assert base.shape == gap.shape == (8, 64) and torch.all(gap >= 0) and sgap.numel() == 128
+    assert torch.equal(positional_term(gap, sgap, 90, 0.0), torch.zeros_like(gap))
+    t = positional_term(gap, sgap, 50, 1.0)
+    assert torch.all(t >= 0) and torch.all(t <= gap)
+
+
+def test_evaluate_methods_adds_pos_rows():
+    from fsiad.model import make_model
+    from fsiad.runner import evaluate_methods
+    cd = _fake_cd()
+    cfg = {"softmin_k": 5}
+    methods = {"baseline": make_model("baseline", 8, cfg).to(DEV).eval(),
+               "fixed_bank": make_model("fixed_bank", 8, cfg, lam=0.2, tau_d=0.1).to(DEV).eval()}
+    methods["random_control"] = methods["fixed_bank"]
+    rows = evaluate_methods(methods, cd, _StubEvaluator(), [(2, 1), (1, 0)], [0],
+                            positional={"quantile": 50, "weight": 1.0, "radius": 2})
+    names = {(r["k0"], r["method"]) for r in rows}
+    assert (2, "baseline+pos") in names and (2, "fixed_bank+pos") in names
+    assert not any(m == "random_control+pos" for _, m in names)
+    assert not any(k == 1 and m.endswith("+pos") for k, m in names)   # margin needs k0 >= 2
+    off = evaluate_methods(methods, cd, _StubEvaluator(), [(2, 0)], [0],
+                           positional={"quantile": 50, "weight": 0.0, "radius": 2})
+    v = {r["method"]: r["px_aupro"] for r in off if r["subset"] == "all"}
+    assert v["baseline+pos"] == v["baseline"]                        # weight 0 = identical
